@@ -123,9 +123,9 @@ def main():
 
         prompt = """
         운전자의 사진을 보고 상태를 아래 형식중에서 가장 적합한 답 하나만 골라서 답변해줘.
-        - 운전자는 졸고 있습니다.
-        - 운전자는 핸드폰을 보고 있습니다.
-        - 운전자는 운전에 집중하고 있습니다.
+        운전자는 졸고 있습니다.
+        운전자는 핸드폰을 보고 있습니다.
+        운전자는 운전에 집중하고 있습니다.
         """
 
         description = call_vllm_with_image(
@@ -134,6 +134,18 @@ def main():
         )
 
         print(description)
+
+        # JSON 파일 경로
+        json_path = os.path.expanduser("~/DCAS/driver_state.json")
+
+        # 저장할 데이터
+        data = {
+            "driver_state": description.strip()
+        }
+
+        # 파일 쓰기 (없으면 생성, 있으면 덮어쓰기)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
     except FileNotFoundError as e:
         print(f"Error: {e}")
