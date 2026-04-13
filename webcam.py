@@ -7,7 +7,7 @@ import time
 from collections import deque
 
 # ==========================================
-# 1. OpenCV 웹캠 실시간 스트림 설정 (RealSense 대체)
+# 1. OpenCV 웹캠 실시간 스트림 설정
 # ==========================================
 cap = cv2.VideoCapture(0)
 
@@ -21,7 +21,7 @@ if not cap.isOpened():
 
 print("웹캠 워밍업 중...")
 time.sleep(2) # 웹캠이 켜질 시간을 잠깐 줍니다.
-print("실시간 모니터링 시작! (약 10~20초 정도 켜두었다가 'q'를 눌러 종료하세요)")
+print("실시간 모니터링 시작! (위험 점수 스코어링 시스템 가동)")
 
 # ==========================================
 # 2. MediaPipe FaceLandmarker 설정
@@ -39,33 +39,26 @@ detector = vision.FaceLandmarker.create_from_options(options)
 
 prev_time = time.time()
 
+# 시스템 변수
 WINDOW_TIME = 3.0
-PERCLOS_THRESHOLD = 0.6
+
 BLINK_THRESHOLD = 0.3
-
-eyes_off_frames = 0
-MAX_EYES_OFF_FRAMES = 60
-
 PITCH_THRESHOLD = 15.0
 YAW_THRESHOLD = 30.0
-LOOK_DOWN_THRESHOLD = 0.5
-
 
 blink_history = deque()
-continuous_open_frames = 0
+
+# 스코어링을 위한 변수
+eyes_off_score_accum = 0.0 # 점진적 누적을 위한 실수형 변수
+MAX_ACCUM_SCORE = 60.0 # 100점으로 환산하기 위한 기준 (약 2초 완전 이탈 시 만점)
+
 
 try:
     while True:
-        # ==========================================
-        # 3. 웹캠에서 프레임 읽어오기
-        # ==========================================
         ret, bgr_image = cap.read()
         if not ret:
             print("프레임을 읽어올 수 없습니다.")
             break
-            
-        # 거울 모드 (좌우 반전 - 본인 얼굴 볼 때 덜 헷갈리도록. 필요 없으면 지워도 무방함)
-        #bgr_image = cv2.flip(bgr_image, 1)
 
         rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
@@ -75,29 +68,6 @@ try:
 
         current_time = time.time()
         is_closed = 0
-        
-        # 블렌드 셰이프 추출을 위한 변수 초기화
-        eye_look_down_left = 0.0
-        eye_look_down_right = 0.0
-
-        if result.face_blendshapes:
-            blendshapes = result.face_blendshapes[0]
-            eye_blink_left = next((item.score for item in blendshapes if item.category_name == 'eyeBlinkLeft'), 0.0)
-            eye_blink_right = next((item.score for item in blendshapes if item.category_name == 'eyeBlinkRight'), 0.0)
-            
-            # Gaze 관련 점수 추출 (다음 단계를 위해 미리 변수만 빼두었습니다)
-            eye_look_down_left = next((item.score for item in blendshapes if item.category_name == 'eyeLookDownLeft'), 0.0)
-            eye_look_down_right = next((item.score for item in blendshapes if item.category_name == 'eyeLookDownRight'), 0.0)
-            
-            if eye_blink_left >= BLINK_THRESHOLD and eye_blink_right >= BLINK_THRESHOLD:
-                is_closed = 1
-                continuous_open_frames = 0
-            else:
-                is_closed = 0
-                continuous_open_frames += 1
-
-            cv2.putText(annotated_bgr, f'L Blink: {eye_blink_left:.2f}', (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            cv2.putText(annotated_bgr, f'R Blink: {eye_blink_right:.2f}', (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         pitch, yaw, roll = 0.0, 0.0, 0.0
 
@@ -109,10 +79,38 @@ try:
             pitch = -angles[0]
             yaw = -angles[1]
             roll = angles[2]
+        
+        # 블렌드 셰이프 추출을 위한 변수 초기화
+        eye_look_down_left, eye_look_down_right = 0.0, 0.0
+        blink_left, blink_right = 0.0, 0.0
+        look_left, look_right = 0.0, 0.0
 
-            cv2.putText(annotated_bgr, f'Pitch: {pitch:.1f}', (10, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 100), 2)
-            cv2.putText(annotated_bgr, f'Yaw: {yaw:.1f}', (10, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 100), 2)
-            cv2.putText(annotated_bgr, f'Roll: {roll:.1f}', (10, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 100), 2)
+        if result.face_blendshapes:
+            blendshapes = result.face_blendshapes[0]
+            eye_blink_left = next((item.score for item in blendshapes if item.category_name == 'eyeBlinkLeft'), 0.0)
+            eye_blink_right = next((item.score for item in blendshapes if item.category_name == 'eyeBlinkRight'), 0.0)
+            
+            # Gaze 관련 점수 추출 (다음 단계를 위해 미리 변수만 빼두었습니다)
+            eye_look_down_left = next((item.score for item in blendshapes if item.category_name == 'eyeLookDownLeft'), 0.0)
+            eye_look_down_right = next((item.score for item in blendshapes if item.category_name == 'eyeLookDownRight'), 0.0)
+            
+            if pitch >= -4.0:
+                is_l_closed = (eye_blink_left >= BLINK_THRESHOLD) and ()
+
+            if eye_blink_left >= BLINK_THRESHOLD and eye_blink_right >= BLINK_THRESHOLD:
+                is_closed = 1
+                continuous_open_frames = 0
+            else:
+                is_closed = 0
+                continuous_open_frames += 1
+
+            cv2.putText(annotated_bgr, f'L Blink: {eye_blink_left:.2f}', (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.putText(annotated_bgr, f'R Blink: {eye_blink_right:.2f}', (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            cv2.putText(annotated_bgr, f'L Down: {eye_look_down_left:.2f}', (150, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            cv2.putText(annotated_bgr, f'R Down: {eye_look_down_right:.2f}', (150, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+        
 
         is_eyes_off = False
 
