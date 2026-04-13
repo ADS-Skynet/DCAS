@@ -2,99 +2,337 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
-from mediapipe.tasks.python.vision import drawing_utils
-from mediapipe.tasks.python.vision import drawing_styles
+from mediapipe.tasks.python.vision import drawing_utils, drawing_styles
 import numpy as np
-import matplotlib.pyplot as plt
+from collections import deque
+import time
 
-# ==========================================
-# 1. 시각화 함수 정의 (질문하신 코드와 동일)
-# ==========================================
-def draw_landmarks_on_image(rgb_image, detection_result):
-  face_landmarks_list = detection_result.face_landmarks
-  annotated_image = np.copy(rgb_image)
+# ── Configuration ────────────────────────────────────────────────────────────
+MODEL_PATH    = 'face_landmarker.task'
+CAMERA_INDEX  = 0          # /dev/video0  (try 1 if this fails)
+WINDOW_SECS   = 5          # rolling-window length
+FPS_TARGET    = 30
+WINDOW_FRAMES = FPS_TARGET * WINDOW_SECS   # 150 frames
 
-  for idx in range(len(face_landmarks_list)):
-    face_landmarks = face_landmarks_list[idx]
+EYE_CLOSED_THRESH = 0.50   # blink blendshape score → eyes "closed"
+PERCLOS_THRESH    = 0.25   # ≥25 % closed in window triggers full drowsy signal
 
-    drawing_utils.draw_landmarks(
-        image=annotated_image,
-        landmark_list=face_landmarks,
-        connections=vision.FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION,
-        landmark_drawing_spec=None,
-        connection_drawing_spec=drawing_styles.get_default_face_mesh_tesselation_style())
-    drawing_utils.draw_landmarks(
-        image=annotated_image,
-        landmark_list=face_landmarks,
-        connections=vision.FaceLandmarksConnections.FACE_LANDMARKS_CONTOURS,
-        landmark_drawing_spec=None,
-        connection_drawing_spec=drawing_styles.get_default_face_mesh_contours_style())
-    drawing_utils.draw_landmarks(
-        image=annotated_image,
-        landmark_list=face_landmarks,
-        connections=vision.FaceLandmarksConnections.FACE_LANDMARKS_LEFT_IRIS,
-          landmark_drawing_spec=None,
-          connection_drawing_spec=drawing_styles.get_default_face_mesh_iris_connections_style())
-    drawing_utils.draw_landmarks(
-        image=annotated_image,
-        landmark_list=face_landmarks,
-        connections=vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_IRIS,
-          landmark_drawing_spec=None,
-          connection_drawing_spec=drawing_styles.get_default_face_mesh_iris_connections_style())
+# Iris centre landmark indices (MediaPipe 478-point model)
+L_IRIS = 468
+R_IRIS = 473
 
-  return annotated_image
 
-def plot_face_blendshapes_bar_graph(face_blendshapes, ax):
-  face_blendshapes_names = [face_blendshapes_category.category_name for face_blendshapes_category in face_blendshapes]
-  face_blendshapes_scores = [face_blendshapes_category.score for face_blendshapes_category in face_blendshapes]
-  face_blendshapes_ranks = range(len(face_blendshapes_names))
+# ── Helpers ──────────────────────────────────────────────────────────────────
+def get_head_rotation(transformation_matrix):
+    m = np.array(transformation_matrix.data).reshape(4, 4)
+    r = m[:3, :3]
+    pitch = np.degrees(np.arcsin(-r[2, 0]))
+    yaw   = np.degrees(np.arctan2(r[1, 0], r[0, 0]))
+    roll  = np.degrees(np.arctan2(r[2, 1], r[2, 2]))
+    return pitch, yaw, roll
 
-  bar = ax.barh(face_blendshapes_ranks, face_blendshapes_scores, label=[str(x) for x in face_blendshapes_ranks])
-  ax.set_yticks(face_blendshapes_ranks, face_blendshapes_names)
-  ax.invert_yaxis()
 
-  for score, patch in zip(face_blendshapes_scores, bar.patches):
-    ax.text(patch.get_x() + patch.get_width(), patch.get_y(), f"{score:.4f}", va="top")
+def draw_landmarks_on_image(rgb_image, result):
+    annotated = np.copy(rgb_image)
+    for face_landmarks in result.face_landmarks:
+        drawing_utils.draw_landmarks(
+            image=annotated,
+            landmark_list=face_landmarks,
+            connections=vision.FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION,
+            landmark_drawing_spec=None,
+            connection_drawing_spec=drawing_styles.get_default_face_mesh_tesselation_style())
+        drawing_utils.draw_landmarks(
+            image=annotated,
+            landmark_list=face_landmarks,
+            connections=vision.FaceLandmarksConnections.FACE_LANDMARKS_CONTOURS,
+            landmark_drawing_spec=None,
+            connection_drawing_spec=drawing_styles.get_default_face_mesh_contours_style())
+        for conn in [
+            vision.FaceLandmarksConnections.FACE_LANDMARKS_LEFT_IRIS,
+            vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_IRIS,
+        ]:
+            drawing_utils.draw_landmarks(
+                image=annotated,
+                landmark_list=face_landmarks,
+                connections=conn,
+                landmark_drawing_spec=None,
+                connection_drawing_spec=drawing_styles.get_default_face_mesh_iris_connections_style())
+    return annotated
 
-  ax.set_xlabel('Score')
-  ax.set_title("Face Blendshapes")
 
-# ==========================================
-# 2. 실제 실행 코드 (새로 추가된 부분)
-# ==========================================
+# ── Scoring engine ────────────────────────────────────────────────────────────
+class ImpairmentScorer:
+    """
+    Maintains rolling buffers and computes drowsy / drunk scores (0–100).
 
-# 테스트할 이미지 파일 경로 (현재 폴더에 test_image.jpg가 있어야 합니다)
-IMAGE_FILE = 'test_image.jpg' 
+    Drowsy signals
+    ──────────────
+    • PERCLOS          – % of frames with eyes > 50 % closed
+    • Sustained closure – longest run of consecutive closed frames (microsleeps)
+    • Head nod (droop) – slow forward-pitch trend over the window
 
-# 이전 단계에서 다운받은 모델 파일 로드 및 설정
-base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
-options = vision.FaceLandmarkerOptions(base_options=base_options,
-                                       output_face_blendshapes=True,
-                                       output_facial_transformation_matrixes=True,
-                                       num_faces=1)
-detector = vision.FaceLandmarker.create_from_options(options)
+    Drunk signals
+    ─────────────
+    • Roll sway  – std-dev of head roll (side-to-side)
+    • Yaw sway   – std-dev of head yaw (left-right)
+    • Iris jitter – std-dev of iris centre position normalised by inter-ocular
+                    distance  (nystagmus proxy)
+    • Movement chaos – mean absolute jerk (first-diff of all three angles)
+                       — drunk = erratic; drowsy = slow or absent
+    """
 
-# 이미지 불러오기
-image = mp.Image.create_from_file(IMAGE_FILE)
+    def __init__(self, window: int = WINDOW_FRAMES):
+        n = window
+        self.pitch   = deque(maxlen=n)
+        self.yaw     = deque(maxlen=n)
+        self.roll    = deque(maxlen=n)
+        self.blink_l = deque(maxlen=n)
+        self.blink_r = deque(maxlen=n)
+        self.iris_lx = deque(maxlen=n)
+        self.iris_ly = deque(maxlen=n)
+        self.iris_rx = deque(maxlen=n)
+        self.iris_ry = deque(maxlen=n)
 
-# 얼굴 랜드마크 탐지 실행
-detection_result = detector.detect(image)
+        self.drowsy_score: int = 0
+        self.drunk_score:  int = 0
+        self.signals: dict     = {}
 
-# 원본 이미지에 랜드마크 그리기
-annotated_image = draw_landmarks_on_image(image.numpy_view(), detection_result)
+    # ── ingest ───────────────────────────────────────────────────────────
+    def update(self, blendshapes, transform_matrix, face_landmarks):
+        blink_l = next((b.score for b in blendshapes if b.category_name == 'eyeBlinkLeft'),  0.0)
+        blink_r = next((b.score for b in blendshapes if b.category_name == 'eyeBlinkRight'), 0.0)
+        pitch, yaw, roll = get_head_rotation(transform_matrix)
 
-# 결과 사진 + 얼굴 표정(Blendshapes) 그래프를 한 번에 띄우기
-fig, axes = plt.subplots(1, 2, figsize=(20, 10), gridspec_kw={'width_ratios': [1.1, 1]})
+        self.pitch.append(pitch);    self.yaw.append(yaw);    self.roll.append(roll)
+        self.blink_l.append(blink_l); self.blink_r.append(blink_r)
 
-axes[0].imshow(annotated_image)
-axes[0].axis('off')
-axes[0].set_title("Face Landmarks")
+        if face_landmarks and len(face_landmarks) > R_IRIS:
+            self.iris_lx.append(face_landmarks[L_IRIS].x)
+            self.iris_ly.append(face_landmarks[L_IRIS].y)
+            self.iris_rx.append(face_landmarks[R_IRIS].x)
+            self.iris_ry.append(face_landmarks[R_IRIS].y)
 
-if detection_result.face_blendshapes:
-  plot_face_blendshapes_bar_graph(detection_result.face_blendshapes[0], axes[1])
-else:
-  axes[1].text(0.5, 0.5, 'No face blendshapes detected', ha='center', va='center')
-  axes[1].axis('off')
+        self._compute()
 
-plt.tight_layout()
-plt.show()
+    # ── individual signals ────────────────────────────────────────────────
+    def _perclos(self) -> float:
+        """Proportion of frames where average eye-blink score exceeds threshold."""
+        if len(self.blink_l) < 10:
+            return 0.0
+        avg = (np.array(self.blink_l) + np.array(self.blink_r)) / 2.0
+        return float(np.mean(avg > EYE_CLOSED_THRESH))
+
+    def _max_consec_closed(self) -> int:
+        """Longest consecutive run of closed-eye frames (microsleep detector)."""
+        if len(self.blink_l) < 5:
+            return 0
+        avg   = (np.array(self.blink_l) + np.array(self.blink_r)) / 2.0
+        closed = avg > EYE_CLOSED_THRESH
+        best = cur = 0
+        for c in closed:
+            cur  = cur + 1 if c else 0
+            best = max(best, cur)
+        return best
+
+    def _pitch_droop(self) -> float:
+        """
+        Forward pitch slope in degrees/frame over the window.
+        Positive = head tilting down (drowsy nod).
+        """
+        if len(self.pitch) < 30:
+            return 0.0
+        t = np.arange(len(self.pitch))
+        slope = float(np.polyfit(t, self.pitch, 1)[0])
+        return max(0.0, slope)
+
+    def _roll_std(self) -> float:
+        return float(np.std(self.roll)) if len(self.roll) > 5 else 0.0
+
+    def _yaw_std(self) -> float:
+        return float(np.std(self.yaw))  if len(self.yaw)  > 5 else 0.0
+
+    def _iris_jitter(self) -> float:
+        """
+        Combined iris-position std-dev, normalised by inter-ocular distance.
+        Approximates nystagmus: scale-invariant regardless of camera distance.
+        """
+        if len(self.iris_lx) < 10:
+            return 0.0
+        iod = abs(float(np.mean(self.iris_lx)) - float(np.mean(self.iris_rx))) + 1e-6
+        j = (np.std(self.iris_lx) + np.std(self.iris_ly)
+           + np.std(self.iris_rx) + np.std(self.iris_ry))
+        return float(j / iod)
+
+    def _movement_chaos(self) -> float:
+        """
+        Mean absolute first-difference across all three rotation axes.
+        High = erratic (drunk); low = slow or still (drowsy or normal).
+        """
+        if len(self.pitch) < 10:
+            return 0.0
+        dp = float(np.abs(np.diff(self.pitch)).mean())
+        dy = float(np.abs(np.diff(self.yaw)).mean())
+        dr = float(np.abs(np.diff(self.roll)).mean())
+        return dp + dy + dr
+
+    # ── composite scorer ─────────────────────────────────────────────────
+    def _compute(self):
+        perclos = self._perclos()
+        consec  = self._max_consec_closed()
+        droop   = self._pitch_droop()
+        roll_s  = self._roll_std()
+        yaw_s   = self._yaw_std()
+        jitter  = self._iris_jitter()
+        chaos   = self._movement_chaos()
+
+        # ── Drowsy score (0–100) ──────────────────────────────────────────
+        # PERCLOS: ≥ 0.25 → full contribution
+        perclos_n = min(perclos / PERCLOS_THRESH, 1.0)
+        # Sustained closure: ≥ 15 frames (~0.5 s) is a microsleep
+        consec_n  = min(consec / 15.0, 1.0)
+        # Forward droop: ≥ 0.05 deg/frame over 5-second window is notable
+        droop_n   = min(droop / 0.05, 1.0)
+
+        self.drowsy_score = int(perclos_n * 45 + consec_n * 35 + droop_n * 20)
+
+        # ── Drunk score (0–100) ───────────────────────────────────────────
+        # Roll sway: std ≥ 8° is significant
+        roll_n   = min(roll_s  / 8.0,  1.0)
+        # Yaw sway: same threshold
+        yaw_n    = min(yaw_s   / 8.0,  1.0)
+        # Iris jitter: ratio ≥ 0.05 relative to IOD is notable
+        jitter_n = min(jitter  / 0.05, 1.0)
+        # Movement chaos: ≥ 1 deg/frame mean is erratic
+        chaos_n  = min(chaos   / 1.0,  1.0)
+
+        self.drunk_score = int(roll_n * 30 + yaw_n * 20 + jitter_n * 30 + chaos_n * 20)
+
+        self.signals = dict(
+            perclos=perclos, consec_closed=consec, pitch_droop=droop,
+            roll_std=roll_s, yaw_std=yaw_s,
+            iris_jitter=jitter, movement_chaos=chaos,
+        )
+
+
+# ── HUD drawing ──────────────────────────────────────────────────────────────
+def _score_color(score: int):
+    if score < 45:  return (0, 200, 100)    # green
+    if score < 70:  return (0, 165, 255)    # orange
+    return                 (0,  50, 255)    # red
+
+
+def draw_score_bar(frame, x: int, y: int, label: str, score: int):
+    BAR_W, BAR_H = 180, 16
+    color = _score_color(score)
+    cv2.rectangle(frame, (x, y), (x + BAR_W, y + BAR_H), (50, 50, 50), -1)
+    cv2.rectangle(frame, (x, y), (x + int(BAR_W * score / 100), y + BAR_H), color, -1)
+    cv2.rectangle(frame, (x, y), (x + BAR_W, y + BAR_H), (160, 160, 160), 1)
+    cv2.putText(frame, f"{label}: {score:3d}", (x + BAR_W + 6, y + 13),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.46, (230, 230, 230), 1)
+
+
+def draw_hud(frame, scorer: ImpairmentScorer, fps: float):
+    # Semi-transparent left panel
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (310, frame.shape[0]), (18, 18, 18), -1)
+    cv2.addWeighted(overlay, 0.50, frame, 0.50, 0, frame)
+
+    # Score bars
+    draw_score_bar(frame, 8,  10, "DROWSY", scorer.drowsy_score)
+    draw_score_bar(frame, 8,  34, "DRUNK ", scorer.drunk_score)
+
+    # Status label
+    ds, ks = scorer.drowsy_score, scorer.drunk_score
+    if   ds >= 70:              status, sc = "!! DROWSY ALERT !!", (0,  50, 255)
+    elif ks >= 70:              status, sc = "!! DRUNK  ALERT !!", (0,  50, 255)
+    elif ds >= 45 and ds > ks:  status, sc = "Drowsy Warning",     (0, 165, 255)
+    elif ks >= 45:              status, sc = "Drunk  Warning",      (0, 165, 255)
+    else:                       status, sc = "Normal",              (0, 200, 100)
+    cv2.putText(frame, status, (8, 70), cv2.FONT_HERSHEY_DUPLEX, 0.65, sc, 2)
+
+    # Signal table
+    sig = scorer.signals
+    rows = [
+        ("PERCLOS",    f"{sig.get('perclos', 0):.2f}",           "drowsy"),
+        ("Consec close", f"{sig.get('consec_closed', 0):2d} fr", "drowsy"),
+        ("Pitch droop",  f"{sig.get('pitch_droop', 0):.3f} d/fr","drowsy"),
+        ("Roll std",     f"{sig.get('roll_std', 0):.1f} deg",    "drunk"),
+        ("Yaw  std",     f"{sig.get('yaw_std', 0):.1f} deg",     "drunk"),
+        ("Iris jitter",  f"{sig.get('iris_jitter', 0):.4f}",     "drunk"),
+        ("Move chaos",   f"{sig.get('movement_chaos', 0):.2f}",  "drunk"),
+        ("FPS",          f"{fps:.1f}",                            "info"),
+    ]
+    colors = {"drowsy": (120, 220, 255), "drunk": (200, 255, 120), "info": (180, 180, 180)}
+    for i, (name, val, kind) in enumerate(rows):
+        y = 95 + i * 21
+        c = colors[kind]
+        cv2.putText(frame, f"{name:<14} {val}", (8, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, c, 1)
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+    options = vision.FaceLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.VIDEO,
+        output_face_blendshapes=True,
+        output_facial_transformation_matrixes=True,
+        num_faces=1,
+    )
+    detector = vision.FaceLandmarker.create_from_options(options)
+    scorer   = ImpairmentScorer()
+
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open camera index {CAMERA_INDEX}. Try CAMERA_INDEX=1.")
+
+    t0          = time.time()
+    frame_count = 0
+    fps         = 0.0
+
+    print("Driver Impairment Monitor — press  q  to quit.")
+    while True:
+        ret, frame_bgr = cap.read()
+        if not ret:
+            print("Camera read failed.")
+            break
+
+        frame_count += 1
+        now  = time.time()
+        fps  = frame_count / max(now - t0, 1e-6)
+        ts_ms = int((now - t0) * 1000)
+
+        rgb      = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result   = detector.detect_for_video(mp_image, ts_ms)
+
+        # Annotate face mesh
+        annotated_rgb = draw_landmarks_on_image(rgb, result)
+        display       = cv2.cvtColor(annotated_rgb, cv2.COLOR_RGB2BGR)
+
+        # Score update (only when a face is detected)
+        if (result.face_blendshapes
+                and result.facial_transformation_matrixes
+                and result.face_landmarks):
+            scorer.update(
+                result.face_blendshapes[0],
+                result.facial_transformation_matrixes[0],
+                result.face_landmarks[0],
+            )
+
+        draw_hud(display, scorer, fps)
+        cv2.imshow('Driver Impairment Monitor', display)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    detector.close()
+
+
+if __name__ == '__main__':
+    main()
