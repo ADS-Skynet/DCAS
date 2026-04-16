@@ -114,7 +114,7 @@ try:
         # 점진적 페널티 로직
         # 1. 현재 프레임의 이탈 강도를 계산함.
 
-        # 운전자가 고개를 얼마나 좌우로 회전했는지 비율로 계산
+        # 운전자가 고개를 얼마나 좌우/위아래로 회전했는지 비율로 계산
         ####### 수정 가능성 #######
         pose_dev = max(abs(yaw)/YAW_THRESHOLD, abs(pitch)/PITCH_THRESHOLD)
         # 시선 얼마나 이동했는지 강도 확인
@@ -135,6 +135,7 @@ try:
         blink_history.append((current_time, is_closed))
         while blink_history and (current_time - blink_history[0][0]) > WINDOW_TIME:
             blink_history.popleft()
+        # 30 프레임 이상 데이터가 쌓이면 PERCLOS 계산 시작
         if len(blink_history) > 30:
             closed_frames = sum(state for timestamp, state in blink_history)
             perclos = closed_frames / len(blink_history)
@@ -142,11 +143,14 @@ try:
             perclos = 0.0
 
         # 위험 점수 및 상태 판별
+        ####### 수정 가능성 #######
         f_distraction = (eyes_off_score_accum / MAX_ACCUM_SCORE) * 100.0
         f_fatigue = min(100.0, (perclos / 0.6) * 100.0)
         f_inactivity = 100.0 if (pitch < -10 or abs(roll) > 20) else 0.0
 
+        # 시선 이탈(50%) + 졸음(30%) + 자세 무너짐(20%)
         risk_score = (0.5 * f_distraction) + (0.3 * f_fatigue) + (0.2 * f_inactivity)
+
         risk_score = min(100.0, max(0.0, risk_score))
 
         # 상태 및 색상 결정
