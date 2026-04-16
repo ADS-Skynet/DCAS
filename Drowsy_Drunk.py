@@ -145,11 +145,40 @@ class ImpairmentScorer:
         slope = float(np.polyfit(t, self.pitch, 1)[0])
         return max(0.0, slope)
 
-    def _roll_std(self) -> float:
-        return float(np.std(self.roll)) if len(self.roll) > 5 else 0.0
+    def _pitch_movement(self) -> float:
+        """Mean abs frame-to-frame pitch change — head nodding (drowsy)."""
+        if len(self.pitch) < 10:
+            return 0.0
+        return float(np.abs(np.diff(self.pitch)).mean())
 
-    def _yaw_std(self) -> float:
-        return float(np.std(self.yaw))  if len(self.yaw)  > 5 else 0.0
+    def _roll_drift(self) -> float:
+        """
+        Sustained directional roll — head drooping to one side (drowsy).
+        abs(mean of signed diffs) is large when roll consistently moves one way.
+        """
+        if len(self.roll) < 10:
+            return 0.0
+        return abs(float(np.mean(np.diff(self.roll))))
+
+    def _roll_oscillation(self) -> float:
+        """
+        Direction-reversal rate in roll — left-right-left sway (drunk).
+        Random noise ≈ 50 % reversals; perfect alternation = 100 %.
+        Normalised so 50 % → 0 and 100 % → 1.
+        """
+        if len(self.roll) < 10:
+            return 0.0
+        d = np.diff(self.roll)
+        if len(d) < 2:
+            return 0.0
+        rate = float(np.sum(np.sign(d[1:]) != np.sign(d[:-1]))) / (len(d) - 1)
+        return min(rate / 1.2, 1.0)
+
+    def _yaw_movement(self) -> float:
+        """Mean abs frame-to-frame yaw change — erratic head turning (drunk)."""
+        if len(self.yaw) < 10:
+            return 0.0
+        return float(np.abs(np.diff(self.yaw)).mean())
 
     def _iris_jitter(self) -> float:
         """
@@ -163,54 +192,55 @@ class ImpairmentScorer:
            + np.std(self.iris_rx) + np.std(self.iris_ry))
         return float(j / iod)
 
-    def _movement_chaos(self) -> float:
-        """
-        Mean absolute first-difference across all three rotation axes.
-        High = erratic (drunk); low = slow or still (drowsy or normal).
-        """
-        if len(self.pitch) < 10:
-            return 0.0
-        dp = float(np.abs(np.diff(self.pitch)).mean())
-        dy = float(np.abs(np.diff(self.yaw)).mean())
-        dr = float(np.abs(np.diff(self.roll)).mean())
-        return dp + dy + dr
-
     # ── composite scorer ─────────────────────────────────────────────────
     def _compute(self):
-        perclos = self._perclos()
-        consec  = self._max_consec_closed()
-        droop   = self._pitch_droop()
-        roll_s  = self._roll_std()
-        yaw_s   = self._yaw_std()
-        jitter  = self._iris_jitter()
-        chaos   = self._movement_chaos()
+        perclos    = self._perclos()
+        consec     = self._max_consec_closed()
+        droop      = self._pitch_droop()
+        pitch_mov  = self._pitch_movement()
+        roll_drift = self._roll_drift()
+        roll_osc   = self._roll_oscillation()   # already in [0, 1]
+        yaw_mov    = self._yaw_movement()
+        jitter     = self._iris_jitter()
 
         # ── Drowsy score (0–100) ──────────────────────────────────────────
         # PERCLOS: ≥ 0.25 → full contribution
-        perclos_n = min(perclos / PERCLOS_THRESH, 1.0)
+        perclos_n    = min(perclos    / PERCLOS_THRESH, 1.0)
         # Sustained closure: ≥ 15 frames (~0.5 s) is a microsleep
-        consec_n  = min(consec / 15.0, 1.0)
-        # Forward droop: ≥ 0.05 deg/frame over 5-second window is notable
-        droop_n   = min(droop / 0.05, 1.0)
+        consec_n     = min(consec     / 15.0,           1.0)
+        # Forward pitch trend: ≥ 0.05 deg/frame over window
+        droop_n      = min(droop      / 0.05,           1.0)
+        # Pitch nodding: ≥ 0.3 deg/frame mean change
+        pitch_mov_n  = min(pitch_mov  / 0.3,            1.0)
+        # Sustained roll drift: ≥ 0.05 deg/frame in one direction
+        roll_drift_n = min(roll_drift / 0.05,           1.0)
 
-        self.drowsy_score = int(perclos_n * 45 + consec_n * 35 + droop_n * 20)
+        self.drowsy_score = int(
+            perclos_n    * 35 +
+            consec_n     * 25 +
+            droop_n      * 15 +
+            pitch_mov_n  * 15 +
+            roll_drift_n * 10
+        )
 
         # ── Drunk score (0–100) ───────────────────────────────────────────
-        # Roll sway: std ≥ 8° is significant
-        roll_n   = min(roll_s  / 8.0,  1.0)
-        # Yaw sway: same threshold
-        yaw_n    = min(yaw_s   / 8.0,  1.0)
-        # Iris jitter: ratio ≥ 0.05 relative to IOD is notable
-        jitter_n = min(jitter  / 0.05, 1.0)
-        # Movement chaos: ≥ 1 deg/frame mean is erratic
-        chaos_n  = min(chaos   / 1.0,  1.0)
+        # Iris jitter: ratio ≥ 0.12 relative to IOD
+        jitter_n  = min(jitter  / 0.12, 1.0)
+        # Erratic yaw turns: ≥ 0.5 deg/frame mean change
+        yaw_mov_n = min(yaw_mov / 0.5,  1.0)
+        # Roll oscillation: alternating direction (already normalised 0–1)
 
-        self.drunk_score = int(roll_n * 30 + yaw_n * 20 + jitter_n * 30 + chaos_n * 20)
+        self.drunk_score = int(
+            jitter_n  * 35 +
+            yaw_mov_n * 30 +
+            roll_osc  * 35
+        )
 
         self.signals = dict(
-            perclos=perclos, consec_closed=consec, pitch_droop=droop,
-            roll_std=roll_s, yaw_std=yaw_s,
-            iris_jitter=jitter, movement_chaos=chaos,
+            perclos=perclos, consec_closed=consec,
+            pitch_droop=droop, pitch_mov=pitch_mov,
+            roll_drift=roll_drift, roll_osc=roll_osc,
+            yaw_mov=yaw_mov, iris_jitter=jitter,
         )
 
 
@@ -253,14 +283,15 @@ def draw_hud(frame, scorer: ImpairmentScorer, fps: float):
     # Signal table
     sig = scorer.signals
     rows = [
-        ("PERCLOS",    f"{sig.get('perclos', 0):.2f}",           "drowsy"),
-        ("Consec close", f"{sig.get('consec_closed', 0):2d} fr", "drowsy"),
-        ("Pitch droop",  f"{sig.get('pitch_droop', 0):.3f} d/fr","drowsy"),
-        ("Roll std",     f"{sig.get('roll_std', 0):.1f} deg",    "drunk"),
-        ("Yaw  std",     f"{sig.get('yaw_std', 0):.1f} deg",     "drunk"),
-        ("Iris jitter",  f"{sig.get('iris_jitter', 0):.4f}",     "drunk"),
-        ("Move chaos",   f"{sig.get('movement_chaos', 0):.2f}",  "drunk"),
-        ("FPS",          f"{fps:.1f}",                            "info"),
+        ("PERCLOS",      f"{sig.get('perclos', 0):.2f}",           "drowsy"),
+        ("Consec close", f"{sig.get('consec_closed', 0):2d} fr",   "drowsy"),
+        ("Pitch droop",  f"{sig.get('pitch_droop', 0):.3f} d/fr",  "drowsy"),
+        ("Pitch mov",    f"{sig.get('pitch_mov', 0):.3f} d/fr",    "drowsy"),
+        ("Roll drift",   f"{sig.get('roll_drift', 0):.3f} d/fr",   "drowsy"),
+        ("Roll osc",     f"{sig.get('roll_osc', 0):.2f}",          "drunk"),
+        ("Yaw  mov",     f"{sig.get('yaw_mov', 0):.3f} d/fr",      "drunk"),
+        ("Iris jitter",  f"{sig.get('iris_jitter', 0):.4f}",       "drunk"),
+        ("FPS",          f"{fps:.1f}",                              "info"),
     ]
     colors = {"drowsy": (120, 220, 255), "drunk": (200, 255, 120), "info": (180, 180, 180)}
     for i, (name, val, kind) in enumerate(rows):

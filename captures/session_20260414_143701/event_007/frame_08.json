@@ -1,0 +1,18 @@
+{
+  "blink_left": 0.10606061667203903,
+  "blink_right": 0.07284639030694962,
+  "perclos": 0.2,
+  "consec_closed": 11,
+  "pitch": 4.8,
+  "yaw": -0.26,
+  "roll": -11.08,
+  "pitch_droop": 0.0,
+  "iris_jitter": 0.51209,
+  "roll_std": 4.534,
+  "yaw_std": 0.464,
+  "movement_chaos": 0.648,
+  "drowsy_score": 61,
+  "drunk_score": 61,
+  "alert_score": 79,
+  "timestamp_ms": 34946
+}
