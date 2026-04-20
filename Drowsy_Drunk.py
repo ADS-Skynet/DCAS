@@ -139,7 +139,7 @@ class ImpairmentScorer:
         Forward pitch slope in degrees/frame over the window.
         Positive = head tilting down (drowsy nod).
         """
-        if len(self.pitch) < 30:
+        if len(self.pitch) < 10:
             return 0.0
         t = np.arange(len(self.pitch))
         slope = float(np.polyfit(t, self.pitch, 1)[0])
@@ -169,28 +169,31 @@ class ImpairmentScorer:
         if len(self.roll) < 10:
             return 0.0
         d = np.diff(self.roll)
-        if len(d) < 2:
+        d = d[np.abs(d) > 0.2]  # ignore tiny changes (noise)
+        if len(d) < 10:
             return 0.0
         rate = float(np.sum(np.sign(d[1:]) != np.sign(d[:-1]))) / (len(d) - 1)
-        return min(rate / 1.2, 1.0)
+        normalized = (rate - 0.5) / 0.5  # scale so 0.5 → 0 and 1.0 → 1.0
+        return max(0.0, min(normalized, 1.0))
 
     def _yaw_movement(self) -> float:
         """Mean abs frame-to-frame yaw change — erratic head turning (drunk)."""
-        if len(self.yaw) < 10:
+        if len(self.yaw) < 30:
             return 0.0
-        return float(np.abs(np.diff(self.yaw)).mean())
+        d = np.abs(np.diff(self.yaw))
+        return float(np.mean(d > 1.0))
 
     def _iris_jitter(self) -> float:
         """
         Combined iris-position std-dev, normalised by inter-ocular distance.
         Approximates nystagmus: scale-invariant regardless of camera distance.
         """
-        if len(self.iris_lx) < 10:
+        if len(self.iris_lx) < 30:
             return 0.0
         iod = abs(float(np.mean(self.iris_lx)) - float(np.mean(self.iris_rx))) + 1e-6
         j = (np.std(self.iris_lx) + np.std(self.iris_ly)
            + np.std(self.iris_rx) + np.std(self.iris_ry))
-        return float(j / iod)
+        return max(0.0, float(j / iod) - 0.02)
 
     # ── composite scorer ─────────────────────────────────────────────────
     def _compute(self):
@@ -199,42 +202,38 @@ class ImpairmentScorer:
         droop      = self._pitch_droop()
         pitch_mov  = self._pitch_movement()
         roll_drift = self._roll_drift()
-        roll_osc   = self._roll_oscillation()   # already in [0, 1]
+        roll_osc   = self._roll_oscillation()
         yaw_mov    = self._yaw_movement()
         jitter     = self._iris_jitter()
 
-        # ── Drowsy score (0–100) ──────────────────────────────────────────
-        # PERCLOS: ≥ 0.25 → full contribution
         perclos_n    = min(perclos    / PERCLOS_THRESH, 1.0)
-        # Sustained closure: ≥ 15 frames (~0.5 s) is a microsleep
         consec_n     = min(consec     / 15.0,           1.0)
-        # Forward pitch trend: ≥ 0.05 deg/frame over window
         droop_n      = min(droop      / 0.05,           1.0)
-        # Pitch nodding: ≥ 0.3 deg/frame mean change
         pitch_mov_n  = min(pitch_mov  / 0.3,            1.0)
-        # Sustained roll drift: ≥ 0.05 deg/frame in one direction
         roll_drift_n = min(roll_drift / 0.05,           1.0)
+        jitter_n     = min(jitter     / 0.12,           1.0)
+        yaw_mov_n    = min(yaw_mov    / 0.5,            1.0)
 
-        self.drowsy_score = int(
+        alpha_drowsy = 0.2  # EMA smoothing factor
+        alpha_drunk = 0.2
+
+        # ── Drowsy score (EMA) ────────────────────────────────────────────────
+        new_drowsy = int(
             perclos_n    * 35 +
             consec_n     * 25 +
             droop_n      * 15 +
-            pitch_mov_n  * 15 +
+            pitch_mov_n  * 20 +
             roll_drift_n * 10
         )
+        self.drowsy_score = int(alpha_drowsy * new_drowsy + (1 - alpha_drowsy) * self.drowsy_score)
 
-        # ── Drunk score (0–100) ───────────────────────────────────────────
-        # Iris jitter: ratio ≥ 0.12 relative to IOD
-        jitter_n  = min(jitter  / 0.12, 1.0)
-        # Erratic yaw turns: ≥ 0.5 deg/frame mean change
-        yaw_mov_n = min(yaw_mov / 0.5,  1.0)
-        # Roll oscillation: alternating direction (already normalised 0–1)
-
-        self.drunk_score = int(
-            jitter_n  * 35 +
-            yaw_mov_n * 30 +
-            roll_osc  * 35
+        # ── Drunk score (EMA) ─────────────────────────────────────────────────
+        new_drunk = int(
+            jitter_n  * 45 +
+            yaw_mov_n * 40 +
+            roll_osc  * 45
         )
+        self.drunk_score = int(alpha_drunk * new_drunk + (1 - alpha_drunk) * self.drunk_score)
 
         self.signals = dict(
             perclos=perclos, consec_closed=consec,
@@ -246,7 +245,7 @@ class ImpairmentScorer:
 
 # ── HUD drawing ──────────────────────────────────────────────────────────────
 def _score_color(score: int):
-    if score < 45:  return (0, 200, 100)    # green
+    if score < 50:  return (0, 200, 100)    # green
     if score < 70:  return (0, 165, 255)    # orange
     return                 (0,  50, 255)    # red
 
