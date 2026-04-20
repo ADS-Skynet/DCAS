@@ -7,74 +7,6 @@ import time
 from collections import deque
 
 # ==========================================
-# 음주 및 피로 통계 분석기
-# ==========================================
-class ImpairmentScorer:
-    
-    def __init__(self, window_frames=150): # 최근 5초간 프레임 고려함
-        self.n = window_frames
-        self.pitch = deque(maxlen=self.n)
-        self.yaw = deque(maxlen=self.n)
-        self.roll = deque(maxlen=self.n)
-        self.blink = deque(maxlen=self.n)
-        self.iris_lx = deque(maxlen=self.n)
-        self.iris_ly = deque(maxlen=self.n)
-        self.iris_rx = deque(maxlen=self.n)
-        self.iris_ry = deque(maxlen=self.n)
-
-        self.drunk_score = 0.0
-        self.stat_drowsy_score = 0.0
-
-    def update(self, pitch, yaw, roll, blink_avg, iris_lx, iris_ly, iris_rx, iris_ry):
-        self.pitch.append(pitch)
-        self.yaw.append(yaw)
-        self.roll.append(roll)
-        self.blink.append(blink_avg)
-        self.iris_lx.append(iris_lx)
-        self.iris_ly.append(iris_ly)
-        self.iris_rx.append(iris_rx)
-        self.iris_ry.append(iris_ry)
-        self._compute()
-
-    def _compute(self):
-        if len(self.pitch) < 10: # 최소 10프레임 이상 쌓이지 않았다면 통계 계산 건너뜀
-            return
-
-        # 음주 특징 추출
-        # 1. 시선 떨림 (Iris jitter, 안진)
-        iod = abs(np.mean(self.iris_lx) - np.mean(self.iris_rx)) + 1e-6 # 양안 눈동자(iris) 간의 픽셀 거리 (원근감 보정용도)
-        jitter = (np.std(self.iris_lx) + np.std(self.iris_ly) + np.std(self.iris_rx) + np.std(self.iris_ry)) / iod # 5초간 눈동자 좌표의 표준편차(흔들린 정도)를 모두 더하고, 눈 사이의 거리로 나누어서 비율을 구함. 절대적인 흔들림 비율 구함
-        jitter_n = min(jitter / 0.12, 1.0) # 떨림 비율이 0.12(12%) 이상이면 최대치 1.0으로 정규화
-
-        # 2. 불규칙한 고개 돌림
-        yaw_mov = np.abs(np.diff(self.yaw)).mean() # np.diff : 프레임 간 변화량 (속도) , 좌우 회전 속도의 절댓값의 평균을 구함
-        yaw_mov_n = min(yaw_mov / 0.5, 1.0) # 0.5 
-
-        # 3. 고개 비틀거림
-        d_roll = np.diff(self.roll)
-        rate = float(np.sum(np.sign(d_roll[1:]) != np.sign(d_roll[:-1]))) / max(len(d_roll)-1, 1)
-        roll_osc = min(rate / 1.2, 1.0)
-
-        # 통계적 음주 점수
-        self.drunk_score = (jitter_n * 35) + (yaw_mov_n * 30) + (roll_osc * 35)
-
-        # 피로 통계 특징 추출
-        # 1. PERCLOS
-        perclos = np.mean(np.array(self.blink) > 0.3)
-        perclos_n = min(perclos / 0.25, 1.0)
-
-        # 2. 꾸벅임
-        pitch_mov = np.abs(np.diff(self.pitch)).mean()
-        pitch_mov_n = min(pitch_mov / 0.3, 1.0)
-
-        # 3. 고개 떨굼
-        roll_drift = abs(float(np.mean(np.diff(self.roll))))
-        roll_drift_n = min(roll_drift / 0.05, 1.0)
-
-        # 통계적 피로 점수
-        self.stat_drowsy_score = (perclos_n * 50) + (pitch_mov_n * 25) + (roll_drift_n * 25)
-
-# ==========================================
 # 초기 설정 및 시스템 워밍업
 # ==========================================
 cap = cv2.VideoCapture(0)
@@ -120,13 +52,12 @@ EYES_ON_RESET = 2.0 * FPS
 
 # 인지 임계값
 BLINK_THRESHOLD = 0.3
-PITCH_THRESHOLD = 15.0
-YAW_THRESHOLD = 30.0
-GAZE_DEV_THRESHOLD = 0.5
 
-# 랜드마크 인덱스 (동공)
-L_IRIS = 468
-R_IRIS = 473
+EYE_YAW_WEIGHT = 40.0
+EYE_PITCH_WEIGHT = 50.0
+
+SAFE_YAW_LIMIT = 15.0
+SAFE_PITCH_LIMIT = 15.0
 
 # 타이머 변수 초기화
 timer_occlusion = 0
@@ -134,8 +65,6 @@ timer_long_distraction = 0
 timer_fatigue = 0
 timer_eyes_on = 0
 vats_history = deque(maxlen = VATS_WINDOW)
-
-stat_scorer = ImpairmentScorer(window_frames=int(5.0 * FPS))
 
 try:
     while True:
@@ -156,59 +85,70 @@ try:
         is_closed = False
         is_occluded = False
 
-        if not result.facial_transformation_matrixes or not result.face_blendshapes or not result.face_landmarks:
+        # 화면 출력을 위한 변수 초기화
+        pitch = yaw = roll = 0.0
+        in_l = in_r = out_l = out_r = up_l = up_r = down_l = down_r = 0.0
+        true_yaw = true_pitch = 0.0
+
+        if not result.facial_transformation_matrixes or not result.face_blendshapes:
             timer_occlusion += 1
             if timer_occlusion >= OCCLUSION_MAX:
                 is_occluded = True
         else:
             timer_occlusion = 0
 
+            # 1. 고개 각도 계산
             rotation_matrix = result.facial_transformation_matrixes[0][:3, :3]
             angles, _, _, _, _, _ = cv2.RQDecomp3x3(rotation_matrix)
             pitch, yaw, roll = -angles[0], -angles[1], angles[2]
 
-
+            # 2. 눈동자 점수 계산 (화면 출력용 변수 저장)
             blendshapes = result.face_blendshapes[0]
+            
+            # 상/하
+            down_l = next((item.score for item in blendshapes if item.category_name == 'eyeLookDownLeft'), 0.0)
+            down_r = next((item.score for item in blendshapes if item.category_name == 'eyeLookDownRight'), 0.0)
+            up_l = next((item.score for item in blendshapes if item.category_name == 'eyeLookUpLeft'), 0.0)
+            up_r = next((item.score for item in blendshapes if item.category_name == 'eyeLookUpRight'), 0.0)
+            
+            # 좌/우 (In/Out)
+            in_l = next((item.score for item in blendshapes if item.category_name == 'eyeLookInLeft'), 0.0)
+            in_r = next((item.score for item in blendshapes if item.category_name == 'eyeLookInRight'), 0.0)
+            out_l = next((item.score for item in blendshapes if item.category_name == 'eyeLookOutLeft'), 0.0)
+            out_r = next((item.score for item in blendshapes if item.category_name == 'eyeLookOutRight'), 0.0)
+
+            # 시선 이탈 로직 (기존 코드 유지)
+            look_down = (down_l + down_r) / 2.0
+            look_up = (up_l + up_r) / 2.0
+            look_left = (out_l + in_r) / 2.0
+            look_right = (in_l + out_r) / 2.0
+
+            eye_yaw_offset = (look_right - look_left) * EYE_YAW_WEIGHT
+            eye_pitch_offset = (look_up - look_down) * EYE_PITCH_WEIGHT
+
+            true_yaw = yaw + eye_yaw_offset
+            true_pitch = pitch + eye_pitch_offset
+
+            if abs(true_yaw) > SAFE_YAW_LIMIT or abs(true_pitch) > SAFE_PITCH_LIMIT:
+                is_eyes_off = True
 
             blink_left = next((item.score for item in blendshapes if item.category_name == 'eyeBlinkLeft'), 0.0)
             blink_right = next((item.score for item in blendshapes if item.category_name == 'eyeBlinkRight'), 0.0)
-            blink_avg = (blink_left + blink_right) / 2.0
-
-            down_left = next((item.score for item in blendshapes if item.category_name == 'eyeLookDownLeft'), 0.0)
-            down_right = next((item.score for item in blendshapes if item.category_name == 'eyeLookDownRight'), 0.0)
-            look_left = (next((item.score for item in blendshapes if item.category_name == 'eyeLookOutLeft'), 0.0) + next((item.score for item in blendshapes if item.category_name == 'eyeLookInRight'), 0.0)) / 2
-            look_right = (next((item.score for item in blendshapes if item.category_name == 'eyeLookInLeft'), 0.0) + next((item.score for item in blendshapes if item.category_name == 'eyeLookOutRight'), 0.0)) / 2
-
-            landmarks = result.face_landmarks[0]
-            iris_lx, iris_ly = landmarks[L_IRIS].x, landmarks[L_IRIS].y
-            iris_rx, iris_ry = landmarks[R_IRIS].x, landmarks[R_IRIS].y
-
-            pose_dev = max(abs(yaw)/YAW_THRESHOLD, abs(pitch)/PITCH_THRESHOLD)
-            gaze_dev = max(down_left, down_right, look_left, look_right)
-            
-            if max(pose_dev, gaze_dev) > GAZE_DEV_THRESHOLD:
-                is_eyes_off = True
-
-            if blink_avg > BLINK_THRESHOLD:
+            if blink_left > BLINK_THRESHOLD and blink_right > BLINK_THRESHOLD:
                 is_closed = True
-
-            stat_scorer.update(pitch, yaw, roll, blink_avg, iris_lx, iris_ly, iris_rx, iris_ry)
 
         # ==========================================
         # Euro NCAP 기준 타이머 업데이트
         # ==========================================
         if not is_occluded and timer_occlusion == 0:
+            if is_closed: timer_fatigue += 1
+            else: timer_fatigue = 0
 
-            if is_closed:
-                timer_fatigue += 1
-            else:
-                timer_fatigue = 0
-
-            if is_eyes_off: # 시선 이탈
+            if is_eyes_off:
                 timer_long_distraction += 1
                 timer_eyes_on = 0
                 vats_history.append(1)
-            else: # 시선 정면
+            else:
                 timer_long_distraction = 0
                 timer_eyes_on += 1
                 vats_history.append(0)
@@ -219,46 +159,23 @@ try:
         # ==========================================
         # 항목별 점수화 (0~100점)
         # ==========================================
-
         score_long = min(100.0, (timer_long_distraction / LONG_DISTRACTION_MAX) * 100.0)
+        score_fatigue = min(100.0, (timer_fatigue / FATIGUE_MAX) * 100.0)
         score_vats = min(100.0, (sum(vats_history) / VATS_MAX) * 100.0)
-
-        score_fatigue = min(100.0, max((timer_fatigue / FATIGUE_MAX) * 100.0, stat_scorer.stat_drowsy_score))
-        score_drunk = min(100.0, stat_scorer.drunk_score)
         
         # ==========================================
         # State Machine
         # ==========================================
+        final_risk_score = max(score_long, score_fatigue, score_vats)
+        dms_state, color, alert_msg = "NORMAL", (0, 255, 0), ""
 
-        final_risk_score = max(score_long, score_vats, score_fatigue, score_drunk)
-        dms_state, color = "NORMAL", (0, 255, 0)
-        alert_msg = ""
-
-        # 1 순위 : 가려짐
         if is_occluded:
-            final_risk_score = 0
-            dms_state, color = "SYSTEM DEGRADED", (128, 128, 128)
-            alert_msg = "CAMERA OCCLUDED (>10s)"
-
-        # 2 순위 : 무반응 운전자 (6초 이상 이탈/수면)
+            final_risk_score = 0; dms_state, color, alert_msg = "SYSTEM DEGRADED", (128, 128, 128), "CAMERA OCCLUDED"
         elif timer_long_distraction >= UNRESPONSIVE_MAX or timer_fatigue >= UNRESPONSIVE_MAX:
-            final_risk_score = 100.0
-            dms_state, color = "EMERGENCY", (255, 0, 255)
-            alert_msg = "UNRESPONSIVE DRIVER"
-        
-        # 3 순위 : 규정 위반 (3초 이상 이탈/수면, or 누적 10초)
+            final_risk_score = 100.0; dms_state, color, alert_msg = "EMERGENCY", (255, 0, 255), "UNRESPONSIVE DRIVER"
         elif final_risk_score == 100.0:
             dms_state, color = "WARNING", (0, 0, 255)
-            if score_drunk == 100.0:
-                alert_msg = "DRUNK / IMPAIRED DETECTED"
-            elif score_fatigue == 100.0:
-                alert_msg = "SLEEP DETECTED"
-            elif score_long == 100.0:
-                alert_msg = "LONG DISTRACTION"
-            else:
-                alert_msg = "SHORT DISTRACTION (VATS)"
-
-        # 4 순위 : VLM 호출 대기 구간
+            alert_msg = "SLEEP DETECTED" if score_fatigue == 100.0 else "LONG DISTRACTION" if score_long == 100.0 else "SHORT DISTRACTION"
         elif final_risk_score >= 50.0:
             dms_state, color = "CAUTION", (0, 165, 255)
 
@@ -266,30 +183,52 @@ try:
         # UI 대시보드 출력
         # ==========================================
         cv2.putText(annotated_bgr, f'STATE: {dms_state}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        if alert_msg:
-            cv2.putText(annotated_bgr, alert_msg, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        if alert_msg: cv2.putText(annotated_bgr, alert_msg, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        y_offset = 320
-        scores_to_draw = [
-            ("Long Dist", score_long, (0,0,255)),
-            ("VATS Acc", score_vats, (0,165,255)),
-            ("Fatigue", score_fatigue, (255,0,0)),
-            ("Drunk", score_drunk, (200,255,120))
-        ]
+        if is_occluded:
+            cv2.putText(annotated_bgr, "PLEASE UNBLOCK THE CAMERA", (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+        else:
+            # 왼쪽 하단: 상태 게이지
+            cv2.putText(annotated_bgr, f'Long Dist: {int(score_long)}', (10, 360), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+            cv2.rectangle(annotated_bgr, (150, 350), (150 + int(score_long*2), 365), (0,0,255), -1)
+            cv2.putText(annotated_bgr, f'VATS (Acc): {int(score_vats)}', (10, 390), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+            cv2.rectangle(annotated_bgr, (150, 380), (150 + int(score_vats*2), 395), (0,165,255), -1)
+            cv2.putText(annotated_bgr, f'Fatigue: {int(score_fatigue)}', (10, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+            cv2.rectangle(annotated_bgr, (150, 410), (150 + int(score_fatigue*2), 425), (255,0,0), -1)
+            cv2.putText(annotated_bgr, f'FINAL RISK: {int(final_risk_score)}', (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        for i, (label, sc, c) in enumerate(scores_to_draw):
-            y = y_offset + (i * 30)
-            cv2.putText(annotated_bgr, f'{label}: {int(sc)}', (10, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
-            cv2.rectangle(annotated_bgr, (140, y), (140 + int(sc*2), y+15), c, -1)
-            cv2.rectangle(annotated_bgr, (140, y), (340, y+15), (100,100,100), 1) # 테두리
+            # 💡 오른쪽 상단: 시선 & 고개 Telemetry (HUD)
+            overlay = annotated_bgr.copy()
+            cv2.rectangle(overlay, (420, 10), (630, 280), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.6, annotated_bgr, 0.4, 0, annotated_bgr)
+            
+            # [고개 각도]
+            cv2.putText(annotated_bgr, "[ Head Pose (deg) ]", (430, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+            cv2.putText(annotated_bgr, f"Pitch : {pitch:5.1f}", (430, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            cv2.putText(annotated_bgr, f"Yaw   : {yaw:5.1f}", (430, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
-        # 최종 위험 점수
-        cv2.putText(annotated_bgr, f'FINAL RISK: {int(final_risk_score)}', (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+            # [안구 회전 점수]
+            cv2.putText(annotated_bgr, "[ Eye Blendshapes ]", (430, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+            cv2.putText(annotated_bgr, f"In L  : {in_l:5.2f}", (430, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(annotated_bgr, f"In R  : {in_r:5.2f}", (530, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(annotated_bgr, f"Out L : {out_l:5.2f}", (430, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(annotated_bgr, f"Out R : {out_r:5.2f}", (530, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(annotated_bgr, f"Up L  : {up_l:5.2f}", (430, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(annotated_bgr, f"Up R  : {up_r:5.2f}", (530, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            
+            # [안구 보상 각도 (Offset)]
+            cv2.putText(annotated_bgr, "[ Eye Offset (deg) ]", (430, 185), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+            cv2.putText(annotated_bgr, f"Yaw Off  : {eye_yaw_offset:+5.1f}", (430, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 255, 200), 1)
+            cv2.putText(annotated_bgr, f"Pitch Off: {eye_pitch_offset:+5.1f}", (430, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 255, 200), 1)
 
-        cv2.imshow('Ultimate Hybrid DMS (Euro NCAP + Statistical)', annotated_bgr)
+            # [종합 이탈 평가 (True Gaze)]
+            gaze_color = (0, 0, 255) if is_eyes_off else (0, 255, 0)
+            cv2.putText(annotated_bgr, "[ True Gaze ]", (430, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+            cv2.putText(annotated_bgr, f"True Yaw  : {true_yaw:5.1f}", (430, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.45, gaze_color, 1)
+
+        cv2.imshow('Euro NCAP True Gaze Tracker', annotated_bgr)
         if cv2.waitKey(1) & 0xFF == ord('q'): break
 
 finally:
     cap.release()
     cv2.destroyAllWindows()
-
