@@ -94,13 +94,13 @@ class ImpairmentScorer:
         self.roll    = deque(maxlen=n)
         self.blink_l = deque(maxlen=n)
         self.blink_r = deque(maxlen=n)
-        self.iris_lx = deque(maxlen=n)
-        self.iris_ly = deque(maxlen=n)
-        self.iris_rx = deque(maxlen=n)
-        self.iris_ry = deque(maxlen=n)
+        # self.iris_lx = deque(maxlen=n)  # drunk (disabled)
+        # self.iris_ly = deque(maxlen=n)  # drunk (disabled)
+        # self.iris_rx = deque(maxlen=n)  # drunk (disabled)
+        # self.iris_ry = deque(maxlen=n)  # drunk (disabled)
 
         self.drowsy_score: int = 0
-        self.drunk_score:  int = 0
+        # self.drunk_score:  int = 0  # drunk (disabled)
         self.signals: dict     = {}
 
     def update(self, blendshapes, transform_matrix, face_landmarks):
@@ -111,11 +111,11 @@ class ImpairmentScorer:
         self.pitch.append(pitch);    self.yaw.append(yaw);    self.roll.append(roll)
         self.blink_l.append(blink_l); self.blink_r.append(blink_r)
 
-        if face_landmarks and len(face_landmarks) > R_IRIS:
-            self.iris_lx.append(face_landmarks[L_IRIS].x)
-            self.iris_ly.append(face_landmarks[L_IRIS].y)
-            self.iris_rx.append(face_landmarks[R_IRIS].x)
-            self.iris_ry.append(face_landmarks[R_IRIS].y)
+        # if face_landmarks and len(face_landmarks) > R_IRIS:  # drunk (disabled)
+        #     self.iris_lx.append(face_landmarks[L_IRIS].x)
+        #     self.iris_ly.append(face_landmarks[L_IRIS].y)
+        #     self.iris_rx.append(face_landmarks[R_IRIS].x)
+        #     self.iris_ry.append(face_landmarks[R_IRIS].y)
 
         self._compute()
 
@@ -148,25 +148,25 @@ class ImpairmentScorer:
         if len(self.roll) < 10: return 0.0
         return abs(float(np.mean(np.diff(self.roll))))
 
-    def _roll_oscillation(self) -> float:
-        if len(self.roll) < 10: return 0.0
-        d = np.diff(self.roll)
-        d = d[np.abs(d) > 0.2]
-        if len(d) < 10: return 0.0
-        rate = float(np.sum(np.sign(d[1:]) != np.sign(d[:-1]))) / (len(d) - 1)
-        return max(0.0, min((rate - 0.5) / 0.5, 1.0))
+    # def _roll_oscillation(self) -> float:  # drunk (disabled)
+    #     if len(self.roll) < 10: return 0.0
+    #     d = np.diff(self.roll)
+    #     d = d[np.abs(d) > 0.2]
+    #     if len(d) < 10: return 0.0
+    #     rate = float(np.sum(np.sign(d[1:]) != np.sign(d[:-1]))) / (len(d) - 1)
+    #     return max(0.0, min((rate - 0.5) / 0.5, 1.0))
 
-    def _yaw_movement(self) -> float:
-        if len(self.yaw) < 30: return 0.0
-        d = np.abs(np.diff(self.yaw))
-        return float(np.mean(d > 1.0))
+    # def _yaw_movement(self) -> float:  # drunk (disabled)
+    #     if len(self.yaw) < 30: return 0.0
+    #     d = np.abs(np.diff(self.yaw))
+    #     return float(np.mean(d > 1.0))
 
-    def _iris_jitter(self) -> float:
-        if len(self.iris_lx) < 30: return 0.0
-        iod = abs(float(np.mean(self.iris_lx)) - float(np.mean(self.iris_rx))) + 1e-6
-        j = (np.std(self.iris_lx) + np.std(self.iris_ly)
-           + np.std(self.iris_rx) + np.std(self.iris_ry))
-        return max(0.0, float(j / iod) - 0.02)
+    # def _iris_jitter(self) -> float:  # drunk (disabled)
+    #     if len(self.iris_lx) < 30: return 0.0
+    #     iod = abs(float(np.mean(self.iris_lx)) - float(np.mean(self.iris_rx))) + 1e-6
+    #     j = (np.std(self.iris_lx) + np.std(self.iris_ly)
+    #        + np.std(self.iris_rx) + np.std(self.iris_ry))
+    #     return max(0.0, float(j / iod) - 0.02)
 
     def _compute(self):
         perclos    = self._perclos()
@@ -174,17 +174,17 @@ class ImpairmentScorer:
         droop      = self._pitch_droop()
         pitch_mov  = self._pitch_movement()
         roll_drift = self._roll_drift()
-        roll_osc   = self._roll_oscillation()
-        yaw_mov    = self._yaw_movement()
-        jitter     = self._iris_jitter()
+        # roll_osc = self._roll_oscillation()  # drunk (disabled)
+        # yaw_mov  = self._yaw_movement()        # drunk (disabled)
+        # jitter   = self._iris_jitter()         # drunk (disabled)
 
         perclos_n    = min(perclos    / PERCLOS_THRESH, 1.0)
         consec_n     = min(consec     / 15.0,           1.0)
         droop_n      = min(droop      / 0.05,           1.0)
         pitch_mov_n  = min(pitch_mov  / 0.3,            1.0)
         roll_drift_n = min(roll_drift / 0.05,           1.0)
-        jitter_n     = min(jitter     / 0.12,           1.0)
-        yaw_mov_n    = min(yaw_mov    / 0.5,            1.0)
+        # jitter_n = min(jitter / 0.12, 1.0)  # drunk (disabled)
+        # yaw_mov_n = min(yaw_mov / 0.5, 1.0)  # drunk (disabled)
 
         alpha = 0.2
 
@@ -197,18 +197,20 @@ class ImpairmentScorer:
         )
         self.drowsy_score = int(alpha * new_drowsy + (1 - alpha) * self.drowsy_score)
 
-        new_drunk = int(
-            jitter_n  * 45 +
-            yaw_mov_n * 40 +
-            roll_osc  * 45
-        )
-        self.drunk_score = int(alpha * new_drunk + (1 - alpha) * self.drunk_score)
+        # new_drunk = int(               # drunk (disabled)
+        #     jitter_n  * 45 +
+        #     yaw_mov_n * 40 +
+        #     roll_osc  * 45
+        # )
+        # self.drunk_score = int(alpha * new_drunk + (1 - alpha) * self.drunk_score)
 
         self.signals = dict(
             perclos=perclos, consec_closed=consec,
             pitch_droop=droop, pitch_mov=pitch_mov,
-            roll_drift=roll_drift, roll_osc=roll_osc,
-            yaw_mov=yaw_mov, iris_jitter=jitter,
+            roll_drift=roll_drift,
+            # roll_osc=roll_osc,   # drunk (disabled)
+            # yaw_mov=yaw_mov,     # drunk (disabled)
+            # iris_jitter=jitter,  # drunk (disabled)
         )
 
 
@@ -341,15 +343,14 @@ def draw_hud(frame, scorer: ImpairmentScorer, tracker: DistractionTracker, fps: 
     frame[:] = cv2.addWeighted(overlay, 0.50, frame, 0.50, 0)
 
     draw_score_bar(frame,  8, 10, "DROWSY", scorer.drowsy_score)
-    draw_score_bar(frame,  8, 34, "DRUNK ", scorer.drunk_score)
+    # draw_score_bar(frame, 8, 34, "DRUNK ", scorer.drunk_score)  # drunk (disabled)
 
     # Drowsy/Drunk status label
-    ds, ks = scorer.drowsy_score, scorer.drunk_score
-    if   ds >= 70:             status, sc = "!! DROWSY ALERT !!", (0,  50, 255)
-    elif ks >= 70:             status, sc = "!! DRUNK  ALERT !!", (0,  50, 255)
-    elif ds >= 45 and ds > ks: status, sc = "Drowsy Warning",     (0, 165, 255)
-    elif ks >= 45:             status, sc = "Drunk  Warning",      (0, 165, 255)
-    else:                      status, sc = "Normal",              (0, 200, 100)
+    ds = scorer.drowsy_score
+    # ks = scorer.drunk_score  # drunk (disabled)
+    if   ds >= 70: status, sc = "!! DROWSY ALERT !!", (0,  50, 255)
+    elif ds >= 45: status, sc = "Drowsy Warning",     (0, 165, 255)
+    else:          status, sc = "Normal",              (0, 200, 100)
     cv2.putText(frame, status, (8, 70), cv2.FONT_HERSHEY_DUPLEX, 0.65, sc, 2)
 
     # Signal table
@@ -360,9 +361,9 @@ def draw_hud(frame, scorer: ImpairmentScorer, tracker: DistractionTracker, fps: 
         ("Pitch droop",  f"{sig.get('pitch_droop', 0):.3f} d/fr",  "drowsy"),
         ("Pitch mov",    f"{sig.get('pitch_mov', 0):.3f} d/fr",    "drowsy"),
         ("Roll drift",   f"{sig.get('roll_drift', 0):.3f} d/fr",   "drowsy"),
-        ("Roll osc",     f"{sig.get('roll_osc', 0):.2f}",          "drunk"),
-        ("Yaw  mov",     f"{sig.get('yaw_mov', 0):.3f} d/fr",      "drunk"),
-        ("Iris jitter",  f"{sig.get('iris_jitter', 0):.4f}",       "drunk"),
+        # ("Roll osc",   f"{sig.get('roll_osc', 0):.2f}",          "drunk"),  # disabled
+        # ("Yaw  mov",   f"{sig.get('yaw_mov', 0):.3f} d/fr",      "drunk"),  # disabled
+        # ("Iris jitter",f"{sig.get('iris_jitter', 0):.4f}",       "drunk"),  # disabled
         ("FPS",          f"{fps:.1f}",                              "info"),
     ]
     colors = {"drowsy": (120, 220, 255), "drunk": (200, 255, 120), "info": (180, 180, 180)}
@@ -476,11 +477,8 @@ def main():
         # Update Euro NCAP distraction tracker (handles None internally)
         tracker.update(blendshapes, transform_mx)
 
-        try:
-            draw_hud(display, scorer, tracker, fps)
-        except Exception as e:
-            print(f"draw_hud error: {e}")
-        cv2.imshow('Driver Monitor', display)
+        draw_hud(display, scorer, tracker, fps)
+        cv2.imshow('Driver Monitor Drowsy/Drunk Euro NCAP', display)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
