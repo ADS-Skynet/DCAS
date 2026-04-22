@@ -18,7 +18,7 @@ WINDOW_FRAMES = FPS_TARGET * WINDOW_SECS   # 150 frames
 
 EYE_CLOSED_THRESH = 0.50   # blink blendshape score → eyes "closed"
 PERCLOS_THRESH    = 0.25   # ≥25 % closed in window triggers full drowsy signal
-
+    
 # Iris centre landmark indices (MediaPipe 478-point model)
 L_IRIS = 468
 R_IRIS = 473
