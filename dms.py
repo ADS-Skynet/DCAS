@@ -186,7 +186,7 @@ class ImpairmentScorer:
         # jitter_n = min(jitter / 0.12, 1.0)  # drunk (disabled)
         # yaw_mov_n = min(yaw_mov / 0.5, 1.0)  # drunk (disabled)
 
-        alpha = 0.2
+        alpha = 0.1
 
         new_drowsy = int(
             perclos_n    * 35 +
@@ -337,89 +337,55 @@ def draw_score_bar(frame, x, y, label, score, bar_w=180, bar_h=16):
 def draw_hud(frame, scorer: ImpairmentScorer, tracker: DistractionTracker, fps: float):
     h, w = frame.shape[:2]
 
-    # ── Left panel: Drowsy/Drunk ──────────────────────────────────────────
+    # ── Left panel (unified) ──────────────────────────────────────────────
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (315, h), (18, 18, 18), -1)
+    cv2.rectangle(overlay, (0, 0), (310, h), (18, 18, 18), -1)
     frame[:] = cv2.addWeighted(overlay, 0.50, frame, 0.50, 0)
 
-    draw_score_bar(frame,  8, 10, "DROWSY", scorer.drowsy_score)
-    # draw_score_bar(frame, 8, 34, "DRUNK ", scorer.drunk_score)  # drunk (disabled)
+    # ── Score bars: Long / VATS / Drowsy ─────────────────────────────────
+    draw_score_bar(frame, 8, 10, "Long  ", tracker.score_long)
+    draw_score_bar(frame, 8, 34, "VATS  ", tracker.score_vats)
+    draw_score_bar(frame, 8, 58, "DROWSY", scorer.drowsy_score)
 
-    # Drowsy/Drunk status label
+    # ── Status label ──────────────────────────────────────────────────────
     ds = scorer.drowsy_score
-    # ks = scorer.drunk_score  # drunk (disabled)
-    if   ds >= 70: status, sc = "!! DROWSY ALERT !!", (0,  50, 255)
-    elif ds >= 45: status, sc = "Drowsy Warning",     (0, 165, 255)
-    else:          status, sc = "Normal",              (0, 200, 100)
-    cv2.putText(frame, status, (8, 70), cv2.FONT_HERSHEY_DUPLEX, 0.65, sc, 2)
-
-    # Signal table
-    sig = scorer.signals
-    rows = [
-        ("PERCLOS",      f"{sig.get('perclos', 0):.2f}",           "drowsy"),
-        ("Consec close", f"{sig.get('consec_closed', 0):2d} fr",   "drowsy"),
-        ("Pitch droop",  f"{sig.get('pitch_droop', 0):.3f} d/fr",  "drowsy"),
-        ("Pitch mov",    f"{sig.get('pitch_mov', 0):.3f} d/fr",    "drowsy"),
-        ("Roll drift",   f"{sig.get('roll_drift', 0):.3f} d/fr",   "drowsy"),
-        # ("Roll osc",   f"{sig.get('roll_osc', 0):.2f}",          "drunk"),  # disabled
-        # ("Yaw  mov",   f"{sig.get('yaw_mov', 0):.3f} d/fr",      "drunk"),  # disabled
-        # ("Iris jitter",f"{sig.get('iris_jitter', 0):.4f}",       "drunk"),  # disabled
-        ("FPS",          f"{fps:.1f}",                              "info"),
-    ]
-    colors = {"drowsy": (120, 220, 255), "drunk": (200, 255, 120), "info": (180, 180, 180)}
-    for i, (name, val, kind) in enumerate(rows):
-        y = 95 + i * 21
-        cv2.putText(frame, f"{name:<14} {val}", (8, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, colors[kind], 1)
-
-    # ── Right panel: Euro NCAP Distraction ───────────────────────────────
-    rx = w - 220
-    overlay2 = frame.copy()
-    cv2.rectangle(overlay2, (rx - 5, 0), (w, 220), (10, 10, 30), -1)
-    frame[:] = cv2.addWeighted(overlay2, 0.55, frame, 0.45, 0)
-
-    # NCAP state color
-    ncap_colors = {
-        "NORMAL":    (0, 200, 100),
-        "CAUTION":   (0, 165, 255),
-        "WARNING":   (0,  50, 255),
-        "EMERGENCY": (255, 0, 255),
-        "OCCLUDED":  (128, 128, 128),
-    }
-    nc = ncap_colors.get(tracker.ncap_state, (200, 200, 200))
-
-    cv2.putText(frame, "[ Euro NCAP ]", (rx, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-    cv2.putText(frame, tracker.ncap_state, (rx, 44),
-                cv2.FONT_HERSHEY_DUPLEX, 0.65, nc, 2)
-
-    # NCAP score bars (compact, bar_w=100)
-    draw_score_bar(frame, rx, 55,  "Long  ", tracker.score_long, bar_w=100)
-    draw_score_bar(frame, rx, 75,  "VATS  ", tracker.score_vats, bar_w=100)
-
-    # Gaze telemetry
-    gaze_col = (0, 0, 255) if tracker.is_eyes_off else (0, 255, 0)
-    cv2.putText(frame, f"TrueYaw  :{tracker.true_yaw:+6.1f}", (rx, 108),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.40, gaze_col, 1)
-    cv2.putText(frame, f"TruePitch:{tracker.true_pitch:+6.1f}", (rx, 124),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.40, gaze_col, 1)
-    cv2.putText(frame, f"EyeYawOff:{tracker.eye_yaw_off:+6.1f}", (rx, 140),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 255, 180), 1)
-    cv2.putText(frame, f"EyePitOff:{tracker.eye_pitch_off:+6.1f}", (rx, 155),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 255, 180), 1)
-
-    eyes_label = "EYES OFF" if tracker.is_eyes_off else "EYES ON "
-    cv2.putText(frame, eyes_label, (rx, 176),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.50, gaze_col, 2)
-
+    nc_state = tracker.ncap_state
     if tracker.is_occluded:
-        cv2.putText(frame, "CAMERA OCCLUDED", (w // 2 - 130, h // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        status, sc = "CAMERA OCCLUDED",      (128, 128, 128)
+    elif nc_state == "EMERGENCY":
+        status, sc = "!! DISTRACTION EMERG", (255,   0, 255)
+    elif nc_state == "WARNING":
+        status, sc = "DISTRACTION WARNING",  (0,   50, 255)
+    elif ds >= 70:
+        status, sc = "!! DROWSY ALERT !!",   (0,   50, 255)
+    elif nc_state == "CAUTION" or ds >= 45:
+        status, sc = "CAUTION",              (0,  165, 255)
+    else:
+        status, sc = "Normal",               (0,  200, 100)
+    cv2.putText(frame, status, (8, 90), cv2.FONT_HERSHEY_DUPLEX, 0.60, sc, 2)
 
-    # Emergency banner
-    if tracker.ncap_state == "EMERGENCY":
-        cv2.putText(frame, "! DISTRACTION EMERGENCY !", (rx - 30, 205),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 0, 255), 2)
+    # ── Parameter table ───────────────────────────────────────────────────
+    sig = scorer.signals
+    gaze_col = (0, 0, 255) if tracker.is_eyes_off else (0, 255, 0)
+    eyes_label = "EYES OFF" if tracker.is_eyes_off else "EYES ON "
+
+    rows = [
+        ("PERCLOS",      f"{sig.get('perclos', 0):.2f}",          (120, 220, 255)),
+        ("Consec close", f"{sig.get('consec_closed', 0):2d} fr",  (120, 220, 255)),
+        ("Pitch droop",  f"{sig.get('pitch_droop', 0):.3f} d/fr", (120, 220, 255)),
+        ("Pitch mov",    f"{sig.get('pitch_mov', 0):.3f} d/fr",   (120, 220, 255)),
+        ("Roll drift",   f"{sig.get('roll_drift', 0):.3f} d/fr",  (120, 220, 255)),
+        ("TrueYaw",      f"{tracker.true_yaw:+6.1f} deg",           gaze_col),
+        ("TruePitch",    f"{tracker.true_pitch:+6.1f} deg",         gaze_col),
+        ("EyeYawOff",    f"{tracker.eye_yaw_off:+6.1f}",            (180, 255, 180)),
+        ("EyePitOff",    f"{tracker.eye_pitch_off:+6.1f}",          (180, 255, 180)),
+        (eyes_label,     "",                                         gaze_col),
+        ("FPS",          f"{fps:.1f}",                               (180, 180, 180)),
+    ]
+    for i, (name, val, color) in enumerate(rows):
+        y = 115 + i * 21
+        cv2.putText(frame, f"{name:<14} {val}", (8, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -478,7 +444,7 @@ def main():
         tracker.update(blendshapes, transform_mx)
 
         draw_hud(display, scorer, tracker, fps)
-        cv2.imshow('Driver Monitor Drowsy/Drunk Euro NCAP', display)
+        cv2.imshow('DMS Driver Monitoring System', display)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
