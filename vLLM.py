@@ -122,10 +122,31 @@ def main():
         image_base64 = get_image_base64(image_input)
 
         prompt = """
-        운전자의 사진을 보고 상태를 아래 형식중에서 가장 적합한 답 하나만 골라서 답변해줘.
-        운전자는 졸고 있습니다.
-        운전자는 핸드폰을 보고 있습니다.
-        운전자는 운전에 집중하고 있습니다.
+        Analyze this image and choose exactly ONE category.
+
+        A: BLOCKED_LENS
+        - The entire image is out of focus or motion-blurred
+        - Details are indistinct but no fog/film overlay
+        - Background edges are soft and undefined
+
+        B: DRIVER_UNCONSCIOUS
+        - Image is clear
+        - Driver is present but head is drooping downward or slumped
+        - Only the top of head or back of head visible due to drooping
+
+        C: FOGGY_LENS
+        - Entire image has a foggy, hazy, or milky overlay
+        - Looks like condensation or dirt on the lens
+        - Background exists but is visible through the haze
+
+
+        KEY DISTINCTIONS:
+        - Whole image soft/blurry → A
+        - Whole image hazy/foggy overlay → C
+        - Image clear, person present but collapsed → B
+
+        Reply in JSON only, no other text:
+        {"category": "BLOCKED_LENS" or "FOGGY_LENS" or "DRIVER_UNCONSCIOUS", "confidence": 0.0~1.0}
         """
 
         description = call_vllm_with_image(
