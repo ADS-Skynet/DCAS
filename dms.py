@@ -193,7 +193,8 @@ class ImpairmentScorer:
         jitter_n     = min(jitter     / 0.12,           1.0)
         yaw_mov_n    = min(yaw_mov    / 0.5,            1.0)
 
-        alpha = 0.1
+        alpha_up   = 0.1
+        alpha_down = 0.03
 
         new_drowsy = int(
             perclos_n    * 35 +
@@ -202,6 +203,7 @@ class ImpairmentScorer:
             pitch_mov_n  * 20 +
             roll_drift_n * 10
         )
+        alpha = alpha_up if new_drowsy > self.drowsy_score else alpha_down
         self.drowsy_score = int(alpha * new_drowsy + (1 - alpha) * self.drowsy_score)
 
         new_impairment = int(
@@ -209,6 +211,7 @@ class ImpairmentScorer:
             yaw_mov_n * 40 +
             roll_osc  * 45
         )
+        alpha = alpha_up if new_impairment > self.impairment_score else alpha_down
         self.impairment_score = int(alpha * new_impairment + (1 - alpha) * self.impairment_score)
 
         self.signals = dict(
@@ -315,8 +318,6 @@ class DistractionTracker:
             self.ncap_state = "OCCLUDED"
         elif self.timer_long_distraction >= UNRESPONSIVE_MAX:
             self.ncap_state = "EMERGENCY"
-        elif self.score_long >= 70.0 or self.score_vats >= 70.0:
-            self.ncap_state = "WARNING"
         elif self.score_long >= 50.0 or self.score_vats >= 50.0:
             self.ncap_state = "CAUTION"
         else:
@@ -324,14 +325,14 @@ class DistractionTracker:
 
 
 # ── HUD drawing ───────────────────────────────────────────────────────────────
-def _score_color(score: int):
+def _score_color(score: int, warn: bool = True):
     if score < 50: return (0, 200, 100)
-    if score < 70: return (0, 165, 255)
-    return                (0,  50, 255)
+    if not warn or score < 70: return (0, 165, 255)
+    return                             (0,  50, 255)
 
 
-def draw_score_bar(frame, x, y, label, score, bar_w=180, bar_h=16):
-    color = _score_color(int(score))
+def draw_score_bar(frame, x, y, label, score, bar_w=180, bar_h=16, warn=True):
+    color = _score_color(int(score), warn)
     cv2.rectangle(frame, (x, y), (x + bar_w, y + bar_h), (50, 50, 50), -1)
     cv2.rectangle(frame, (x, y), (x + int(bar_w * score / 100), y + bar_h), color, -1)
     cv2.rectangle(frame, (x, y), (x + bar_w, y + bar_h), (160, 160, 160), 1)
@@ -348,10 +349,10 @@ def draw_hud(frame, scorer: ImpairmentScorer, tracker: DistractionTracker, fps: 
     frame[:] = cv2.addWeighted(overlay, 0.50, frame, 0.50, 0)
 
     # ── Score bars: Long / VATS / Drowsy ─────────────────────────────────
-    draw_score_bar(frame, 8, 10, "Long      ",tracker.score_long)
-    draw_score_bar(frame, 8, 34, "VATS      ",tracker.score_vats)
-    draw_score_bar(frame, 8, 58, "Drowsy    ",scorer.drowsy_score)
-    draw_score_bar(frame, 8, 82, "Impairment",scorer.impairment_score)
+    draw_score_bar(frame, 8, 10, "Long      ", tracker.score_long,       warn=False)
+    draw_score_bar(frame, 8, 34, "VATS      ", tracker.score_vats,       warn=False)
+    draw_score_bar(frame, 8, 58, "Drowsy    ", scorer.drowsy_score)
+    draw_score_bar(frame, 8, 82, "Impairment", scorer.impairment_score)
 
     # ── Status label ──────────────────────────────────────────────────────
     ds = scorer.drowsy_score
@@ -361,8 +362,6 @@ def draw_hud(frame, scorer: ImpairmentScorer, tracker: DistractionTracker, fps: 
         status, sc = "CAMERA OCCLUDED",      (128, 128, 128)
     elif nc_state == "EMERGENCY":
         status, sc = "!! DISTRACTION EMERG", (255,   0, 255)
-    elif nc_state == "WARNING":
-        status, sc = "DISTRACTION WARNING",  (0,   50, 255)
     elif ds >= 70:
         status, sc = "!! DROWSY ALERT !!",   (0,   50, 255)
     elif di >= 70:
