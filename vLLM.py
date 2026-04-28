@@ -6,10 +6,13 @@ import json
 import requests
 from io import BytesIO
 from PIL import Image
+from dotenv import load_dotenv
 
-VLLM_API_URL = "http://210.121.152.22:9000/v1/chat/completions"
-API_KEY = "81cbe888efea8c89da139c5cc8194393c1ead203e11e85a9a5a721428c5a2517"
-MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
+load_dotenv()
+
+VLLM_API_URL = os.environ["VLLM_API_URL"]
+API_KEY      = os.environ["VLLM_API_KEY"]
+MODEL_NAME   = "Qwen/Qwen3-VL-2B-Instruct"
 MAX_IMAGE_SIDE = 768
 
 
