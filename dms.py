@@ -315,7 +315,7 @@ class DistractionTracker:
             self.ncap_state = "OCCLUDED"
         elif self.timer_long_distraction >= UNRESPONSIVE_MAX:
             self.ncap_state = "EMERGENCY"
-        elif self.score_long >= 80.0 or self.score_vats >= 80.0:
+        elif self.score_long >= 70.0 or self.score_vats >= 70.0:
             self.ncap_state = "WARNING"
         elif self.score_long >= 50.0 or self.score_vats >= 50.0:
             self.ncap_state = "CAUTION"
@@ -355,6 +355,7 @@ def draw_hud(frame, scorer: ImpairmentScorer, tracker: DistractionTracker, fps: 
 
     # ── Status label ──────────────────────────────────────────────────────
     ds = scorer.drowsy_score
+    di = scorer.impairment_score
     nc_state = tracker.ncap_state
     if tracker.is_occluded:
         status, sc = "CAMERA OCCLUDED",      (128, 128, 128)
@@ -362,9 +363,11 @@ def draw_hud(frame, scorer: ImpairmentScorer, tracker: DistractionTracker, fps: 
         status, sc = "!! DISTRACTION EMERG", (255,   0, 255)
     elif nc_state == "WARNING":
         status, sc = "DISTRACTION WARNING",  (0,   50, 255)
-    elif ds >= 80:
+    elif ds >= 70:
         status, sc = "!! DROWSY ALERT !!",   (0,   50, 255)
-    elif nc_state == "CAUTION" or ds >= 45:
+    elif di >= 70:
+        status, sc = "!! IMPAIRMENT ALERT !!", (0,   50, 255)
+    elif nc_state == "CAUTION" or ds >= 45 or di >= 50:
         status, sc = "CAUTION",              (0,  165, 255)
     else:
         status, sc = "Normal",               (0,  200, 100)
