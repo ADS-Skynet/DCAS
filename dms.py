@@ -10,6 +10,8 @@ from mediapipe.tasks.python.vision import drawing_utils, drawing_styles
 import numpy as np
 from collections import deque
 import time
+import threading
+import zmq
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 MODEL_PATH   = 'face_landmarker.task'
@@ -44,6 +46,11 @@ SAFE_YAW_LIMIT   = 15.0
 SAFE_PITCH_LIMIT = 15.0
 
 BLINK_THRESHOLD  = 0.3   # for eyes-off detection (separate from PERCLOS)
+
+# ── vLLM ZMQ integration ──────────────────────────────────────────────────────
+ZMQ_PORT    = 5555
+STOP_FRAMES = int(2.0 * FPS_TARGET)  # consecutive frames before dispatch
+STOP_DELTA  = 0.01                   # min change to count as "still moving"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -388,6 +395,52 @@ def draw_hud(frame, scorer: ImpairmentScorer, tracker: DistractionTracker, fps: 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1)
 
 
+# ── vLLM Dispatcher ───────────────────────────────────────────────────────────
+class FreezeDispatcher:
+    """Sends one frame to vLLM when parameter values stop changing for 2 seconds."""
+
+    def __init__(self):
+        self._stop_count = 0
+        self._prev       = None
+        self._triggered  = False
+        self._pending    = False
+        self._ctx        = zmq.Context.instance()
+
+    def update(self, *params):
+        if self._prev is None:
+            self._prev = params
+            return
+        changed = any(abs(c - p) > STOP_DELTA for c, p in zip(params, self._prev))
+        self._prev = params
+        if changed:
+            self._stop_count = 0
+            self._triggered  = False
+        else:
+            self._stop_count += 1
+
+    def maybe_dispatch(self, frame_bgr):
+        if self._stop_count < STOP_FRAMES or self._triggered or self._pending:
+            return
+        self._triggered = True
+        self._pending   = True
+        threading.Thread(target=self._worker, args=(frame_bgr.copy(),), daemon=True).start()
+
+    def _worker(self, frame_bgr):
+        try:
+            sock = self._ctx.socket(zmq.REQ)
+            sock.setsockopt(zmq.RCVTIMEO, 30_000)
+            sock.connect(f"tcp://localhost:{ZMQ_PORT}")
+            _, buf = cv2.imencode('.jpg', frame_bgr)
+            sock.send(buf.tobytes())
+            reply = sock.recv_string()
+        except Exception as e:
+            reply = f"[ZMQ Error] {e}"
+        finally:
+            sock.close()
+        print(f"[vLLM] {reply.strip()}")
+        self._pending = False
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
@@ -401,6 +454,7 @@ def main():
     detector = vision.FaceLandmarker.create_from_options(options)
     scorer   = ImpairmentScorer()
     tracker  = DistractionTracker()
+    freeze   = FreezeDispatcher()
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
@@ -442,6 +496,13 @@ def main():
 
         # Update Euro NCAP distraction tracker (handles None internally)
         tracker.update(blendshapes, transform_mx)
+
+        # Parameter stop detection → vLLM dispatch
+        p_val, y_val = get_head_rotation(transform_mx)[:2] if transform_mx is not None else (0.0, 0.0)
+        bl_val = next((b.score for b in blendshapes if b.category_name == 'eyeBlinkLeft'),  0.0) if blendshapes else 0.0
+        br_val = next((b.score for b in blendshapes if b.category_name == 'eyeBlinkRight'), 0.0) if blendshapes else 0.0
+        freeze.update(p_val, y_val, bl_val, br_val)
+        freeze.maybe_dispatch(frame_bgr)
 
         draw_hud(display, scorer, tracker, fps)
         cv2.imshow('DMS Driver Monitoring System', display)

@@ -161,5 +161,59 @@ def main():
         sys.exit(1)
 
 
+def run_server(port: int = 5555):
+    """ZMQ REP server mode: receives raw JPEG frame bytes, returns vLLM analysis string."""
+    import zmq
+    context = zmq.Context()
+    socket  = context.socket(zmq.REP)
+    socket.bind(f"tcp://*:{port}")
+    print(f"vLLM ZMQ server listening on tcp://*:{port}  (Ctrl-C to stop)")
+
+    prompt = """
+        Analyze this image and choose exactly ONE category.
+
+        A: BLOCKED_LENS
+        - The entire image is out of focus or motion-blurred
+        - Details are indistinct but no fog/film overlay
+        - Background edges are soft and undefined
+
+        B: DRIVER_UNCONSCIOUS
+        - Image is clear
+        - Driver is present but head is drooping downward or slumped
+        - Only the top of head or back of head visible due to drooping
+
+        C: FOGGY_LENS
+        - Entire image has a foggy, hazy, or milky overlay
+        - Looks like condensation or dirt on the lens
+        - Background exists but is visible through the haze
+
+
+        KEY DISTINCTIONS:
+        - Whole image soft/blurry → A
+        - Whole image hazy/foggy overlay → C
+        - Image clear, person present but collapsed → B
+
+        Reply in JSON only, no other text:
+        {"category": "BLOCKED_LENS" or "FOGGY_LENS" or "DRIVER_UNCONSCIOUS", "confidence": 0.0~1.0}
+        """
+
+    while True:
+        try:
+            frame_bytes = socket.recv()
+            img_b64     = base64.b64encode(preprocess_image_bytes(frame_bytes)).decode("utf-8")
+            result      = call_vllm_with_image(img_b64, prompt)
+            socket.send_string(result)
+            print(f"[vLLM] {result.strip()}")
+            json_path = os.path.expanduser("~/DCAS/driver_state.json")
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump({"driver_state": result.strip()}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            socket.send_string(f"[Error] {e}")
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--server":
+        port = int(sys.argv[2]) if len(sys.argv) > 2 else 5555
+        run_server(port)
+    else:
+        main()
