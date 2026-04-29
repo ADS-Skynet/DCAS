@@ -52,6 +52,9 @@ ZMQ_PORT    = 5555
 STOP_FRAMES = int(2.0 * FPS_TARGET)  # consecutive frames before dispatch
 STOP_DELTA  = 0.01                   # min change to count as "still moving"
 
+# ── MRM (Minimum Risk Maneuver) ───────────────────────────────────────────────
+mrm = threading.Event()              # thread-safe flag; set() = MRM active
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def get_head_rotation(transformation_matrix):
@@ -396,6 +399,22 @@ def draw_hud(frame, scorer: ImpairmentScorer, tracker: DistractionTracker, fps: 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1)
 
 
+
+def draw_mrm_popup(frame):
+    h, w = frame.shape[:2]
+    box_w, box_h = 420, 110
+    x1 = (w - box_w) // 2
+    y1 = (h - box_h) // 2
+    x2, y2 = x1 + box_w, y1 + box_h
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), (0, 0, 200), -1)
+    frame[:] = cv2.addWeighted(overlay, 0.80, frame, 0.20, 0)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
+    cv2.putText(frame, "MRM Working ! !", (x1 + 30, y1 + 68),
+                cv2.FONT_HERSHEY_DUPLEX, 1.3, (255, 255, 255), 2)
+
+
 # ── vLLM Dispatcher ───────────────────────────────────────────────────────────
 class FreezeDispatcher:
     """Sends one frame to vLLM when parameter values stop changing for 2 seconds."""
@@ -439,6 +458,13 @@ class FreezeDispatcher:
         finally:
             sock.close()
         print(f"[vLLM] {reply.strip()}")
+        token = reply.strip().upper()
+        if token == "MRM_ON":
+            mrm.set()
+            print("[MRM] Activated.")
+        elif token == "MRM_OFF":
+            mrm.clear()
+            print("[MRM] Deactivated.")
         self._pending = False
 
 
@@ -452,10 +478,10 @@ def main():
         output_facial_transformation_matrixes=True,
         num_faces=1,
     )
-    detector = vision.FaceLandmarker.create_from_options(options)
-    scorer   = ImpairmentScorer()
-    tracker  = DistractionTracker()
-    freeze   = FreezeDispatcher()
+    detector     = vision.FaceLandmarker.create_from_options(options)
+    scorer       = ImpairmentScorer()
+    tracker      = DistractionTracker()
+    freeze       = FreezeDispatcher()
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
@@ -506,10 +532,15 @@ def main():
         freeze.maybe_dispatch(frame_bgr)
 
         draw_hud(display, scorer, tracker, fps)
+        if mrm.is_set():
+            draw_mrm_popup(display)
         cv2.imshow('DMS Driver Monitoring System', display)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
+        elif key == ord('m'):
+            mrm.clear() if mrm.is_set() else mrm.set()
 
     cap.release()
     cv2.destroyAllWindows()
