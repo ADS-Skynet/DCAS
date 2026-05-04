@@ -12,6 +12,9 @@ from collections import deque
 import time
 import threading
 import zmq
+import subprocess
+import wave
+import io
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 MODEL_PATH   = 'face_landmarker.task'
@@ -54,6 +57,22 @@ STOP_DELTA  = 0.01                   # min change to count as "still moving"
 
 # ── MRM (Minimum Risk Maneuver) ───────────────────────────────────────────────
 mrm = threading.Event()              # thread-safe flag; set() = MRM active
+
+
+# ── Alert sound ───────────────────────────────────────────────────────────────
+def _play_alert():
+    sr, freq, dur = 44100, 880, 0.4
+    t = np.linspace(0, dur, int(sr * dur), endpoint=False)
+    samples = (32767 * 0.5 * np.sin(2 * np.pi * freq * t)).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, 'w') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(samples.tobytes())
+    buf.seek(0)
+    subprocess.Popen(['aplay', '-q', '-'], stdin=subprocess.PIPE,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).communicate(buf.read())
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -492,6 +511,7 @@ def main():
     t0          = time.time()
     frame_count = 0
     fps         = 0.0
+    alert_armed = True
 
     print("Driver Monitor System — press  q  to quit.")
     while True:
@@ -530,6 +550,14 @@ def main():
         br_val = next((b.score for b in blendshapes if b.category_name == 'eyeBlinkRight'), 0.0) if blendshapes else 0.0
         freeze.update(p_val, y_val, bl_val, br_val)
         freeze.maybe_dispatch(frame_bgr)
+
+        any_alert = (scorer.drowsy_score >= 70 or scorer.impairment_score >= 70 or
+                     tracker.score_long >= 70 or tracker.score_vats >= 70)
+        if any_alert and alert_armed:
+            threading.Thread(target=_play_alert, daemon=True).start()
+            alert_armed = False
+        elif not any_alert:
+            alert_armed = True
 
         draw_hud(display, scorer, tracker, fps)
         if mrm.is_set():
