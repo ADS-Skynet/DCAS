@@ -1,6 +1,4 @@
-# Drowsy_Drunk_NCAP.py
-# Drowsy/Drunk detection (Drowsy_Drunk.py) +
-# Euro NCAP distraction features (True Gaze, Long Distraction, VATS, Occlusion)
+# dms.py - Driver Monitoring System with Mediapipe and vLLM integration
 
 import cv2
 import mediapipe as mp
