@@ -1,5 +1,6 @@
 
 # dms.py - Driver Monitoring System with Mediapipe and vLLM integration
+import os
 import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -15,7 +16,7 @@ import wave
 import io
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-MODEL_PATH   = 'face_landmarker.task'
+MODEL_PATH   = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'face_landmarker.task')
 CAMERA_INDEX = 0
 WINDOW_SECS  = 5
 FPS_TARGET   = 30

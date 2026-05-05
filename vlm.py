@@ -100,7 +100,7 @@ def run_server(port: int = 5555):
             result      = call_vllm_with_image(img_b64, prompt)
             socket.send_string(result)
             print(f"[vLLM] {result.strip()}")
-            json_path = os.path.expanduser("~/DCAS/driver_state.json")
+            json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "driver_state.json")
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump({"driver_state": result.strip()}, f, ensure_ascii=False, indent=2)
         except Exception as e:
